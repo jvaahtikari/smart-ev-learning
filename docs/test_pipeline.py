@@ -65,7 +65,7 @@ synthetic_trips = [
         "range_estimate_start": 140.0, "car_km_per_soc": 2.0,
         "actual_km_per_soc": round((5.0 + i * 0.1) / 10.0, 3),
         "correction_factor": round(2.0 / ((5.0 + i * 0.1) / 10.0), 3),
-        "avg_power_kwh_per_100km": 72.5,
+        "avg_power_raw": 72.5,
     }
     for i in range(5)
 ] + [
@@ -79,7 +79,7 @@ synthetic_trips = [
         "range_estimate_start": 160.0, "car_km_per_soc": 2.46,
         "actual_km_per_soc": round(12.0 / 7.0, 3),
         "correction_factor": round(2.46 / (12.0 / 7.0), 3),
-        "avg_power_kwh_per_100km": 68.0,
+        "avg_power_raw": 68.0,
     }
     for i in range(3)
 ] + [
@@ -93,7 +93,7 @@ synthetic_trips = [
         "range_estimate_start": 200.0, "car_km_per_soc": 2.5,
         "actual_km_per_soc": round(85.0 / 25.0, 3),
         "correction_factor": round(2.5 / (85.0 / 25.0), 3),
-        "avg_power_kwh_per_100km": 58.0,
+        "avg_power_raw": 58.0,
     }
     for i in range(2)
 ]

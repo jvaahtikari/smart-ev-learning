@@ -105,9 +105,16 @@ def lookup_profile(model_profiles, season, temp_band, drive_type, trip_type, pre
     return None, "no usable profile"
 
 
-def compute_target(profile, fallback_reason, min_soc, buffer, typical_km=30):
+def compute_target(profile, fallback_reason, min_soc, buffer, typical_km=30,
+                   preheat_reserve=0):
+    """
+    Compute target SOC.
+    preheat_reserve: extra SOC % to add when preheating without a charger —
+                     covers the battery drain that happens before engine_on.
+                     Configured via preheat_unplugged_reserve_soc in apps.yaml.
+    """
     if profile is None:
-        return min_soc + buffer, True, fallback_reason
+        return min(100, min_soc + buffer + preheat_reserve), True, fallback_reason
 
     km_per_soc  = profile.get("km_per_soc_ewa")
     soc_per_min = profile.get("soc_per_min_ewa")
@@ -117,9 +124,9 @@ def compute_target(profile, fallback_reason, min_soc, buffer, typical_km=30):
     elif soc_per_min and soc_per_min > 0:
         needed_soc = soc_per_min * 20
     else:
-        return min_soc + buffer, True, "no consumption data in profile"
+        return min(100, min_soc + buffer + preheat_reserve), True, "no consumption data in profile"
 
-    target = needed_soc + min_soc + buffer
+    target = needed_soc + min_soc + buffer + preheat_reserve
     target = max(min_soc + buffer, min(100, round(target)))
     return target, (fallback_reason is not None), fallback_reason
 
@@ -129,8 +136,12 @@ class EVPredictor(hass.Hass):
     def initialize(self):
         self.log("EVPredictor starting")
         self.model_file = self.args.get("model_file", "/config/ev_trips/consumption_model.json")
-        self.min_soc    = int(self.args.get("min_soc_threshold", 20))
-        self.buffer     = int(self.args.get("safety_buffer_soc", 5))
+        self.min_soc          = int(self.args.get("min_soc_threshold", 20))
+        self.buffer           = int(self.args.get("safety_buffer_soc", 5))
+        # Extra SOC reserve when preheating while NOT plugged in.
+        # Covers the battery drain before engine_on (typically 3–8 SOC points).
+        # Set to 0 in apps.yaml if you always preheat with a charger connected.
+        self.preheat_reserve  = int(self.args.get("preheat_unplugged_reserve_soc", 5))
 
         self.run_hourly(self._predict, ":00")
         self.listen_state(self._on_learning_update, "sensor.ev_learning_pct")
@@ -150,11 +161,13 @@ class EVPredictor(hass.Hass):
 
         # Load model
         if not os.path.exists(self.model_file):
+            preheat_reserve = self.preheat_reserve if preheating else 0
+            safe_target = min(100, self.min_soc + self.buffer + preheat_reserve)
             self._publish(
-                target=self.min_soc + self.buffer,
+                target=safe_target,
                 confidence="missing",
                 prediction_active=False,
-                status=f"🔵 No model yet. Charging to safe minimum ({self.min_soc + self.buffer}%).",
+                status=f"🔵 No model yet. Charging to safe minimum ({safe_target}%).",
                 fallback_used=True,
                 fallback_reason="model file missing",
                 temp=temp,
@@ -177,18 +190,22 @@ class EVPredictor(hass.Hass):
             profiles, season, temp_band, drive_type, trip_type, preheating
         )
 
+        # Apply preheat reserve only when preheating is assumed (temp < 5°C)
+        preheat_reserve = self.preheat_reserve if preheating else 0
         target, fallback_used, fallback_reason = compute_target(
-            profile, fallback_reason, self.min_soc, self.buffer
+            profile, fallback_reason, self.min_soc, self.buffer,
+            preheat_reserve=preheat_reserve,
         )
 
         confidence    = profile.get("confidence", "missing") if profile else "missing"
         trip_count    = profile.get("count", 0) if profile else 0
         preheat_label = "preheating assumed" if preheating else "no preheating"
+        reserve_label = f" +{preheat_reserve}% unplugged-preheat reserve" if preheat_reserve else ""
 
         if not fallback_used and profile:
             status = (
                 f"Target SOC: {target}% (confidence: {confidence}, {trip_count} trips) | "
-                f"{temp:.0f}°C forecast, {preheat_label}"
+                f"{temp:.0f}°C forecast, {preheat_label}{reserve_label}"
             )
         elif fallback_reason == "no usable profile":
             needed = max(0, 5 - trip_count)

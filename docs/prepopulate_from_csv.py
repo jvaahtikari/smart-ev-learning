@@ -143,7 +143,7 @@ def reconstruct_trips(series):
 
         # Use car's own average speed sensor at engine_off (more accurate)
         car_avg_speed = nearest_float(avg_speed_s, end_ts, max_gap_hours=0.1)
-        # Power consumption at engine_off = trip average (sensor resets at engine_on)
+        # Power sensor at engine_off — unit is unknown (vendor-specific, ~2.6-3.3x actual kWh/100km)
         power_val     = nearest_float(avg_power_s, end_ts, max_gap_hours=0.1)
         avg_speed     = car_avg_speed if (car_avg_speed and car_avg_speed > 0) \
                         else (distance_km / duration_min) * 60
@@ -181,8 +181,8 @@ def reconstruct_trips(series):
             "range_estimate_start": round(range_val, 1) if range_val else 0,
             "car_km_per_soc":       round(car_km_soc, 2),
             "actual_km_per_soc":    round(actual_km_soc, 2),
-            "correction_factor":         round(correction, 3),
-            "avg_power_kwh_per_100km":   round(power_val, 1) if power_val else None,
+            "correction_factor":  round(correction, 3),
+            "avg_power_raw":      round(power_val, 1) if power_val else None,  # vendor unit unknown
         })
 
     return trips

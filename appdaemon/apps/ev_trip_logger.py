@@ -21,7 +21,7 @@ ENTITY_PREHEAT        = "sensor.smart_pre_climate_active"
 ENTITY_CHARGER        = "sensor.zag063912_charger_mode"
 ENTITY_WEATHER        = "weather.forecast_koti"
 ENTITY_AVG_SPEED      = "sensor.smart_average_speed"   # car's own rolling trip average
-ENTITY_AVG_POWER      = "sensor.smart_average_power_consumption"  # kWh/100km, resets at engine_on
+ENTITY_AVG_POWER      = "sensor.smart_average_power_consumption"  # vendor unit unknown; resets at engine_on
 
 ENGINE_ON_STATE       = "engine_running"
 ENGINE_OFF_STATE      = "engine_off"
@@ -200,8 +200,8 @@ class EVTripLogger(hass.Hass):
         car_avg_speed = seg.get("avg_speed_end", 0)
         avg_speed     = car_avg_speed if car_avg_speed > 0 else (distance_km / duration_min) * 60
 
-        # Car's own trip average power consumption (resets at engine_on → end value = trip average)
-        # Does NOT include pre-trip preheating (sensor starts fresh at engine_on)
+        # Car's own trip power sensor — stored as raw value because the vendor unit does not
+        # correspond to kWh/100km (empirically ~2.6–3.3× too high). Kept for future analysis.
         avg_power     = seg.get("avg_power_end", 0)
 
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
@@ -237,8 +237,8 @@ class EVTripLogger(hass.Hass):
             "range_estimate_start": round(range_est, 1),
             "car_km_per_soc":       round(car_km_soc, 2),
             "actual_km_per_soc":    round(actual_km_soc, 2),
-            "correction_factor":         round(correction, 3),
-            "avg_power_kwh_per_100km":   round(avg_power, 1) if avg_power > 0 else None,
+            "correction_factor":  round(correction, 3),
+            "avg_power_raw":      round(avg_power, 1) if avg_power > 0 else None,  # vendor unit unknown
         }
 
     def _append_trip(self, trip):
