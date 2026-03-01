@@ -12,14 +12,15 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
-MOTOR     = "sensor.smart_motor"
-BATTERY   = "sensor.smart_battery"
-ODOMETER  = "sensor.smart_odometer"
-RANGE_S   = "sensor.smart_range"
-PREHEAT   = "sensor.smart_pre_climate_active"
-WEATHER   = "weather.forecast_koti"
-AVG_SPEED = "sensor.smart_average_speed"
-AVG_POWER = "sensor.smart_average_power_consumption"
+MOTOR         = "sensor.smart_motor"
+BATTERY       = "sensor.smart_battery"
+ODOMETER      = "sensor.smart_odometer"
+RANGE_S       = "sensor.smart_range"
+PREHEAT       = "sensor.smart_pre_climate_active"
+WEATHER       = "weather.forecast_koti"
+AVG_SPEED     = "sensor.smart_average_speed"
+EXTERIOR_TEMP = "sensor.smart_exterior_temperature"
+INTERIOR_TEMP = "sensor.smart_interior_temperature"
 
 STOP_TIMEOUT_MIN = 5
 
@@ -85,13 +86,14 @@ def nearest_float(series_list, ts, max_gap_hours=3):
 
 
 def reconstruct_trips(series):
-    motor_events = series.get(MOTOR, [])
-    battery      = series.get(BATTERY, [])
-    odometer     = series.get(ODOMETER, [])
-    range_est    = series.get(RANGE_S, [])
-    preheat_s    = series.get(PREHEAT, [])
-    avg_speed_s  = series.get(AVG_SPEED, [])
-    avg_power_s  = series.get(AVG_POWER, [])
+    motor_events  = series.get(MOTOR, [])
+    battery       = series.get(BATTERY, [])
+    odometer      = series.get(ODOMETER, [])
+    range_est     = series.get(RANGE_S, [])
+    preheat_s     = series.get(PREHEAT, [])
+    avg_speed_s   = series.get(AVG_SPEED, [])
+    exterior_s    = series.get(EXTERIOR_TEMP, [])
+    interior_s    = series.get(INTERIOR_TEMP, [])
 
     # Find engine_running / engine_off transitions
     segments = []
@@ -143,16 +145,24 @@ def reconstruct_trips(series):
 
         # Use car's own average speed sensor at engine_off (more accurate)
         car_avg_speed = nearest_float(avg_speed_s, end_ts, max_gap_hours=0.1)
-        # Power sensor at engine_off — unit is unknown (vendor-specific, ~2.6-3.3x actual kWh/100km)
-        power_val     = nearest_float(avg_power_s, end_ts, max_gap_hours=0.1)
         avg_speed     = car_avg_speed if (car_avg_speed and car_avg_speed > 0) \
                         else (distance_km / duration_min) * 60
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
         trip_type    = "short" if distance_km < 20 else "long"
 
-        # Use 10°C as default temp (winter data, no weather in CSV)
-        temp_actual  = -5.0  # conservative default for Feb data
+        # Temperature: prefer car's exterior sensor; fall back to default for Feb data
+        exterior_temp      = nearest_float(exterior_s, start_ts, max_gap_hours=1) or 0.0
+        interior_temp_start = nearest_float(interior_s, start_ts, max_gap_hours=1) or 0.0
+        # preheat_temp_delta: positive when cabin was warmer than exterior (preheat worked)
+        preheat_temp_delta = round(interior_temp_start - exterior_temp, 1) if preheating else 0.0
+
+        # Fall back to conservative default for Feb data (no weather in these CSVs)
+        temp_actual  = exterior_temp if exterior_temp != 0.0 else -5.0
         calc_basis   = "time" if (trip_type == "short" and temp_actual < 5) else "km"
+
+        # preheat_soc_cost: cannot be measured from CSV (no pre-preheat SOC snapshot)
+        # Set None so model knows this field is unavailable for historical data
+        preheat_soc_cost = None
 
         car_km_soc    = (range_val / soc_start) if (range_val and soc_start > 0) else 0
         actual_km_soc = distance_km / consumed_soc
@@ -167,6 +177,8 @@ def reconstruct_trips(series):
             "season":               season,
             "temp_band":            band,
             "temp_actual":          temp_actual,
+            "exterior_temp":        round(exterior_temp, 1),
+            "interior_temp_start":  round(interior_temp_start, 1),
             "winter_tyres":         True,  # assume winter tyres for Feb data
             "distance_km":          round(distance_km, 2),
             "duration_min":         round(duration_min, 1),
@@ -178,11 +190,12 @@ def reconstruct_trips(series):
             "consumed_soc":         round(consumed_soc, 1),
             "preheating":           preheating,
             "plugged_in_preheat":   False,
+            "preheat_temp_delta":   preheat_temp_delta,
+            "preheat_soc_cost":     preheat_soc_cost,
             "range_estimate_start": round(range_val, 1) if range_val else 0,
             "car_km_per_soc":       round(car_km_soc, 2),
             "actual_km_per_soc":    round(actual_km_soc, 2),
-            "correction_factor":  round(correction, 3),
-            "avg_power_raw":      round(power_val, 1) if power_val else None,  # vendor unit unknown
+            "correction_factor":    round(correction, 3),
         })
 
     return trips
@@ -225,7 +238,9 @@ if __name__ == "__main__":
 
     for t in trips:
         print(f"  {t['timestamp']}  {t['distance_km']:.1f} km  "
-              f"{t['consumed_soc']:.1f}% SOC  {t['drive_type']}/{t['trip_type']}")
+              f"{t['consumed_soc']:.1f}% SOC  {t['drive_type']}/{t['trip_type']}"
+              f"  ext={t['exterior_temp']}C  int={t['interior_temp_start']}C"
+              f"  preheat_delta={t['preheat_temp_delta']}C")
 
     with open(out_path, "w") as f:
         json.dump(trips, f, indent=2)

@@ -36,7 +36,7 @@ _make_stub()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "appdaemon", "apps"))
 
 from model_updater import build_model
-from predictor import lookup_profile, compute_target, get_temp_band, get_season
+from predictor import lookup_profile, compute_target, get_temp_band, get_season, estimate_preheat_reserve
 
 PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
@@ -45,55 +45,58 @@ results = []
 
 def check(name, condition, detail=""):
     status = PASS if condition else FAIL
-    print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
+    print(f"  [{status}] {name}" + (f" -- {detail}" if detail else ""))
     results.append(condition)
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Synthetic trips covering 3 profiles
+# Step 1 -- Synthetic trips covering 3 profiles
 # ---------------------------------------------------------------------------
 print("\n=== Step 1: Synthetic trips ===")
 
 synthetic_trips = [
-    # Profile A: winter|cold|city|short|cold_start  (5 trips → ready)
+    # Profile A: winter|cold|city|short|cold_start  (5 trips -> ready)
     {
         "timestamp": f"2026-01-0{i}T08:00:00", "season": "winter", "temp_band": "cold",
-        "temp_actual": -10.0, "winter_tyres": True, "distance_km": 5.0 + i * 0.1,
+        "temp_actual": -10.0, "exterior_temp": -10.0, "interior_temp_start": -10.0,
+        "winter_tyres": True, "distance_km": 5.0 + i * 0.1,
         "duration_min": 12.0, "trip_type": "short", "drive_type": "city",
         "calc_basis": "time", "soc_start": 70, "soc_end": 60, "consumed_soc": 10.0,
         "preheating": False, "plugged_in_preheat": False,
+        "preheat_temp_delta": 0.0, "preheat_soc_cost": 0.0,
         "range_estimate_start": 140.0, "car_km_per_soc": 2.0,
         "actual_km_per_soc": round((5.0 + i * 0.1) / 10.0, 3),
         "correction_factor": round(2.0 / ((5.0 + i * 0.1) / 10.0), 3),
-        "avg_power_raw": 72.5,
     }
     for i in range(5)
 ] + [
-    # Profile B: winter|near_zero|mixed|short|cold_start  (3 trips → low confidence)
+    # Profile B: winter|near_zero|mixed|short|cold_start  (3 trips -> low confidence)
     {
         "timestamp": f"2026-02-0{i+1}T08:00:00", "season": "winter", "temp_band": "near_zero",
-        "temp_actual": 0.0, "winter_tyres": True, "distance_km": 12.0,
+        "temp_actual": 0.0, "exterior_temp": 0.0, "interior_temp_start": 18.0,
+        "winter_tyres": True, "distance_km": 12.0,
         "duration_min": 15.0, "trip_type": "short", "drive_type": "mixed",
         "calc_basis": "km", "soc_start": 65, "soc_end": 58, "consumed_soc": 7.0,
-        "preheating": False, "plugged_in_preheat": False,
+        "preheating": True, "plugged_in_preheat": True,
+        "preheat_temp_delta": 18.0, "preheat_soc_cost": 0.0,
         "range_estimate_start": 160.0, "car_km_per_soc": 2.46,
         "actual_km_per_soc": round(12.0 / 7.0, 3),
         "correction_factor": round(2.46 / (12.0 / 7.0), 3),
-        "avg_power_raw": 68.0,
     }
     for i in range(3)
 ] + [
-    # Profile C: spring|cool|highway|long|cold_start  (2 trips → preliminary)
+    # Profile C: spring|cool|highway|long|cold_start  (2 trips -> preliminary)
     {
         "timestamp": f"2026-03-1{i}T10:00:00", "season": "spring", "temp_band": "cool",
-        "temp_actual": 6.0, "winter_tyres": False, "distance_km": 85.0,
+        "temp_actual": 6.0, "exterior_temp": 6.0, "interior_temp_start": 6.0,
+        "winter_tyres": False, "distance_km": 85.0,
         "duration_min": 60.0, "trip_type": "long", "drive_type": "highway",
         "calc_basis": "km", "soc_start": 80, "soc_end": 55, "consumed_soc": 25.0,
         "preheating": False, "plugged_in_preheat": False,
+        "preheat_temp_delta": 0.0, "preheat_soc_cost": 0.0,
         "range_estimate_start": 200.0, "car_km_per_soc": 2.5,
         "actual_km_per_soc": round(85.0 / 25.0, 3),
         "correction_factor": round(2.5 / (85.0 / 25.0), 3),
-        "avg_power_raw": 58.0,
     }
     for i in range(2)
 ]
@@ -102,14 +105,14 @@ check("10 synthetic trips created", len(synthetic_trips) == 10,
       f"{len(synthetic_trips)} trips")
 
 # ---------------------------------------------------------------------------
-# Step 2 — Build model
+# Step 2 -- Build model
 # ---------------------------------------------------------------------------
 print("\n=== Step 2: Model build ===")
 
 model, learning_pct, system_state = build_model(synthetic_trips, alpha=0.15, min_trips=5)
 
 profile_a = model.get("winter|cold|city|short|cold_start")
-profile_b = model.get("winter|near_zero|mixed|short|cold_start")
+profile_b = model.get("winter|near_zero|mixed|short|preheated")
 profile_c = model.get("spring|cool|highway|long|cold_start")
 
 check("Profile A exists",        profile_a is not None)
@@ -137,7 +140,7 @@ check("system_state valid",      system_state in ("collecting", "learning", "par
       system_state)
 
 # ---------------------------------------------------------------------------
-# Step 3 — Predictor lookup and target SOC
+# Step 3 -- Predictor lookup and target SOC
 # ---------------------------------------------------------------------------
 print("\n=== Step 3: Predictor ===")
 
@@ -149,7 +152,13 @@ check("Exact lookup has no fallback",    reason is None, str(reason))
 target, fallback_used, _ = compute_target(p, reason, min_soc=20, buffer=5, typical_km=30)
 check("Target SOC is int",          isinstance(target, int))
 check("Target SOC in range 25-100", 25 <= target <= 100, str(target))
-print(f"         Target SOC (profile A, typical_km=30): {target}%")
+print(f"         Target SOC (profile A, typical_km=30, no preheat reserve): {target}%")
+
+# With preheat reserve (e.g. -10C forecast -> reserve = round((20-(-10)) * 0.15) = round(4.5) = 4)
+target_ph, _, _ = compute_target(p, reason, min_soc=20, buffer=5, typical_km=30, preheat_reserve=4)
+check("Target SOC with preheat reserve >= base target", target_ph >= target,
+      f"{target_ph}% vs {target}%")
+print(f"         Target SOC (profile A, typical_km=30, preheat_reserve=4): {target_ph}%")
 
 # Query that needs fallback (no profile for summer|hot|highway|long)
 p2, reason2 = lookup_profile(model, "summer", "hot", "highway", "long", preheating=False)
@@ -158,7 +167,7 @@ check("No-profile query returns fallback", fallback2 is True or p2 is None)
 check("Fallback target >= min_soc+buffer", target2 >= 25, str(target2))
 
 # ---------------------------------------------------------------------------
-# Step 4 — Temp band and season helpers
+# Step 4 -- Temp band and season helpers
 # ---------------------------------------------------------------------------
 print("\n=== Step 4: Helper functions ===")
 
@@ -173,6 +182,29 @@ check("month 1  -> winter",    get_season(1)      == "winter")
 check("month 4  -> spring",    get_season(4)      == "spring")
 check("month 7  -> summer",    get_season(7)      == "summer")
 check("month 10 -> autumn",    get_season(10)     == "autumn")
+
+# ---------------------------------------------------------------------------
+# Step 5 -- Preheat reserve estimation
+# ---------------------------------------------------------------------------
+print("\n=== Step 5: Preheat reserve ===")
+
+check("temp  5C -> reserve 0",  estimate_preheat_reserve(5)   == 0)
+check("temp  4C -> reserve 2",  estimate_preheat_reserve(4)   == 2,
+      str(estimate_preheat_reserve(4)))
+check("temp  0C -> reserve 3",  estimate_preheat_reserve(0)   == 3,
+      str(estimate_preheat_reserve(0)))
+check("temp -5C -> reserve 4",  estimate_preheat_reserve(-5)  == 4,
+      str(estimate_preheat_reserve(-5)))
+check("temp -10C -> reserve 4", estimate_preheat_reserve(-10) == 4,
+      str(estimate_preheat_reserve(-10)))  # 30°C delta * 0.15 = 4.5, banker's round -> 4
+check("temp -20C -> reserve 6", estimate_preheat_reserve(-20) == 6,
+      str(estimate_preheat_reserve(-20)))
+check("reserve never > 10",     estimate_preheat_reserve(-100) <= 10)
+# Interior colder than exterior (cold garage) -> larger reserve
+r_outdoor = estimate_preheat_reserve(-5)
+r_garage  = estimate_preheat_reserve(-5, interior_temp=-15)
+check("cold interior -> reserve >= outdoor reserve", r_garage >= r_outdoor,
+      f"garage={r_garage} outdoor={r_outdoor}")
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -20,8 +20,9 @@ ENTITY_ODOMETER       = "sensor.smart_odometer"
 ENTITY_PREHEAT        = "sensor.smart_pre_climate_active"
 ENTITY_CHARGER        = "sensor.zag063912_charger_mode"
 ENTITY_WEATHER        = "weather.forecast_koti"
-ENTITY_AVG_SPEED      = "sensor.smart_average_speed"   # car's own rolling trip average
-ENTITY_AVG_POWER      = "sensor.smart_average_power_consumption"  # vendor unit unknown; resets at engine_on
+ENTITY_AVG_SPEED      = "sensor.smart_average_speed"     # car's own rolling trip average; resets at engine_on
+ENTITY_EXTERIOR_TEMP  = "sensor.smart_exterior_temperature"   # car's outdoor temperature sensor
+ENTITY_INTERIOR_TEMP  = "sensor.smart_interior_temperature"   # cabin temperature sensor
 
 ENGINE_ON_STATE       = "engine_running"
 ENGINE_OFF_STATE      = "engine_off"
@@ -63,24 +64,36 @@ class EVTripLogger(hass.Hass):
         self.log_file = self.args.get("log_file", "/config/ev_trips/trips.json")
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
 
-        self._segment = None        # current open segment
-        self._stop_timer = None     # handle for the 5-min stop timer
+        self._segment     = None    # current open segment
+        self._stop_timer  = None    # handle for the 5-min stop timer
+        self._preheat_soc = None    # SOC at moment preheating activated (for cost measurement)
 
         self.listen_state(self._on_motor_change, ENTITY_MOTOR)
-        self.log(f"Listening to {ENTITY_MOTOR}")
+        self.listen_state(self._on_preheat_change, ENTITY_PREHEAT)
+        self.log(f"Listening to {ENTITY_MOTOR} and {ENTITY_PREHEAT}")
 
     # ------------------------------------------------------------------
-    # State change handler
+    # State change handlers
     # ------------------------------------------------------------------
 
     def _on_motor_change(self, entity, attribute, old, new, kwargs):
         if old == new:
             return
-
         if new == ENGINE_ON_STATE:
             self._engine_on()
         elif new == ENGINE_OFF_STATE:
             self._engine_off()
+
+    def _on_preheat_change(self, entity, attribute, old, new, kwargs):
+        """Snapshot battery SOC the moment preheating activates.
+        Used later at engine_on to calculate SOC consumed by unplugged preheating.
+        Only capture on the first activation since last trip end (_preheat_soc is None).
+        """
+        old_active = (old or "off").lower() not in ("off", "unavailable", "unknown", "false", "0")
+        new_active = (new or "off").lower() not in ("off", "unavailable", "unknown", "false", "0")
+        if not old_active and new_active and self._preheat_soc is None:
+            self._preheat_soc = self._float(ENTITY_BATTERY)
+            self.log(f"Preheat activated — SOC snapshot: {self._preheat_soc}%")
 
     def _engine_on(self):
         # Cancel pending stop timer (traffic stop — continue segment)
@@ -92,8 +105,20 @@ class EVTripLogger(hass.Hass):
 
         # Start a new segment
         self._segment = self._snapshot("start")
+
+        # Calculate preheat SOC cost — only meaningful when preheated without charger
+        charger = self.get_state(ENTITY_CHARGER) or "unknown"
+        plugged  = charger.lower() not in ("off", "unavailable", "unknown", "none")
+        if self._preheat_soc is not None and not plugged:
+            preheat_soc_cost = max(0.0, round(self._preheat_soc - self._segment["soc_start"], 1))
+        else:
+            preheat_soc_cost = 0.0
+        self._segment["preheat_soc_cost"] = preheat_soc_cost
+        self._preheat_soc = None  # reset for next trip
+
+        extra = f", preheat_cost={preheat_soc_cost}%" if preheat_soc_cost > 0 else ""
         self.log(f"Segment started: SOC={self._segment['soc_start']}% "
-                 f"odo={self._segment['odometer_start']} km")
+                 f"odo={self._segment['odometer_start']} km{extra}")
 
     def _engine_off(self):
         if self._segment is None:
@@ -113,7 +138,7 @@ class EVTripLogger(hass.Hass):
     # ------------------------------------------------------------------
 
     def _snapshot(self, label):
-        now = datetime.now(timezone.utc)
+        now  = datetime.now(timezone.utc)
         temp = self._get_weather_temp()
         preheat = self._is_preheating()
         charger = self.get_state(ENTITY_CHARGER) or "unknown"
@@ -125,8 +150,9 @@ class EVTripLogger(hass.Hass):
             f"range_estimate_{label}":   self._float(ENTITY_RANGE),
             f"odometer_{label}":         self._float(ENTITY_ODOMETER),
             f"temp_{label}":             temp,
+            f"exterior_temp_{label}":    self._get_exterior_temp(),
+            f"interior_temp_{label}":    self._float(ENTITY_INTERIOR_TEMP),
             f"avg_speed_{label}":        self._float(ENTITY_AVG_SPEED),
-            f"avg_power_{label}":        self._float(ENTITY_AVG_POWER),
             "preheating":                preheat,
             "plugged_in_preheat":        plugged_preheat,
         }
@@ -141,6 +167,14 @@ class EVTripLogger(hass.Hass):
         try:
             attrs = self.get_state(ENTITY_WEATHER, attribute="all") or {}
             return float(attrs.get("attributes", {}).get("temperature", 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _get_exterior_temp(self):
+        """Car's own exterior temperature sensor — more precise than weather API."""
+        try:
+            v = self.get_state(ENTITY_EXTERIOR_TEMP)
+            return float(v) if v not in (None, "unavailable", "unknown") else 0.0
         except (TypeError, ValueError):
             return 0.0
 
@@ -195,14 +229,21 @@ class EVTripLogger(hass.Hass):
             self.log(f"Discarded: consumed_soc={consumed_soc:.1f} <= 0")
             return None
 
-        temp_actual  = (seg["temp_start"] + seg["temp_end"]) / 2
+        # Temperature — prefer car's exterior sensor; fall back to weather API
+        exterior_temp     = seg.get("exterior_temp_start", 0.0)
+        interior_temp_start = seg.get("interior_temp_start", 0.0)
+        weather_temp_avg  = (seg["temp_start"] + seg["temp_end"]) / 2
+        temp_actual       = exterior_temp if exterior_temp != 0.0 else weather_temp_avg
+
+        # Preheat temperature delta: how much warmer the cabin was vs outside at engine_on.
+        # Large delta = cabin was well-heated relative to exterior (plugged or unplugged preheat).
+        # preheat_soc_cost: SOC drained from battery by unplugged preheating (0 if plugged in).
+        preheat_temp_delta = round(interior_temp_start - exterior_temp, 1) if seg.get("preheating") else 0.0
+        preheat_soc_cost   = seg.get("preheat_soc_cost", 0.0)
+
         # Prefer car's own trip average speed (more accurate than calculated)
         car_avg_speed = seg.get("avg_speed_end", 0)
         avg_speed     = car_avg_speed if car_avg_speed > 0 else (distance_km / duration_min) * 60
-
-        # Car's own trip power sensor — stored as raw value because the vendor unit does not
-        # correspond to kWh/100km (empirically ~2.6–3.3× too high). Kept for future analysis.
-        avg_power     = seg.get("avg_power_end", 0)
 
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
         trip_type    = "short" if distance_km < 20 else "long"
@@ -223,6 +264,8 @@ class EVTripLogger(hass.Hass):
             "season":               season,
             "temp_band":            temp_band,
             "temp_actual":          round(temp_actual, 1),
+            "exterior_temp":        round(exterior_temp, 1),
+            "interior_temp_start":  round(interior_temp_start, 1),
             "winter_tyres":         winter_tyres,
             "distance_km":          round(distance_km, 2),
             "duration_min":         round(duration_min, 1),
@@ -234,11 +277,12 @@ class EVTripLogger(hass.Hass):
             "consumed_soc":         round(consumed_soc, 1),
             "preheating":           seg["preheating"],
             "plugged_in_preheat":   seg["plugged_in_preheat"],
+            "preheat_temp_delta":   preheat_temp_delta,
+            "preheat_soc_cost":     round(preheat_soc_cost, 1),
             "range_estimate_start": round(range_est, 1),
             "car_km_per_soc":       round(car_km_soc, 2),
             "actual_km_per_soc":    round(actual_km_soc, 2),
-            "correction_factor":  round(correction, 3),
-            "avg_power_raw":      round(avg_power, 1) if avg_power > 0 else None,  # vendor unit unknown
+            "correction_factor":    round(correction, 3),
         }
 
     def _append_trip(self, trip):

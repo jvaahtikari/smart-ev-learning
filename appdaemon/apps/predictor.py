@@ -10,7 +10,8 @@ from datetime import datetime
 
 import appdaemon.plugins.hass.hassapi as hass
 
-ENTITY_WEATHER  = "weather.forecast_koti"
+ENTITY_WEATHER       = "weather.forecast_koti"
+ENTITY_INTERIOR_TEMP = "sensor.smart_interior_temperature"
 
 VALID_SEASON_BANDS = {
     "winter":  ["jaakyma", "cold", "near_zero", "cool"],
@@ -38,6 +39,13 @@ TEMP_BANDS = [
     (25,   999, "hot"),
 ]
 
+# Target cabin temp used for preheat reserve estimation (°C)
+PREHEAT_TARGET_CABIN_TEMP = 20.0
+
+# SOC per °C of cabin warming needed — initial estimate for Smart #1 heat pump.
+# Calibrates naturally as measured preheat_soc_cost data accumulates across trips.
+PREHEAT_SOC_PER_DEGREE = 0.15
+
 
 def get_temp_band(temp):
     for lo, hi, band in TEMP_BANDS:
@@ -60,6 +68,33 @@ def _adjacent_bands(band, season):
             if abs(adj_idx - idx) == 1:
                 adjacent.append(adj)
     return adjacent
+
+
+def estimate_preheat_reserve(forecast_temp, interior_temp=None):
+    """
+    Estimate SOC % to reserve for unplugged cabin preheating.
+
+    Logic: overnight the cabin cools to roughly exterior/forecast temperature.
+    At trip start, preheat must warm from that expected cabin temp to PREHEAT_TARGET_CABIN_TEMP.
+
+    If interior_temp is provided and lower than forecast_temp (car parked inside a garage etc.),
+    use it as the expected cabin temp — otherwise use forecast_temp as worst-case proxy.
+
+    Coefficient PREHEAT_SOC_PER_DEGREE is an initial estimate for Smart #1 heat pump.
+    It will be refinable once preheat_soc_cost measurements accumulate in trips.json.
+    """
+    if forecast_temp >= 5:
+        return 0  # warm enough, no preheating expected
+
+    # Overnight the cabin equilibrates with outside air
+    expected_cabin_temp = forecast_temp
+    if interior_temp is not None and interior_temp < forecast_temp:
+        # Car in a cold garage — cabin is colder than outside
+        expected_cabin_temp = interior_temp
+
+    temp_delta = max(0.0, PREHEAT_TARGET_CABIN_TEMP - expected_cabin_temp)
+    reserve    = round(temp_delta * PREHEAT_SOC_PER_DEGREE)
+    return min(10, reserve)  # cap at 10 SOC points
 
 
 def lookup_profile(model_profiles, season, temp_band, drive_type, trip_type, preheating):
@@ -109,9 +144,8 @@ def compute_target(profile, fallback_reason, min_soc, buffer, typical_km=30,
                    preheat_reserve=0):
     """
     Compute target SOC.
-    preheat_reserve: extra SOC % to add when preheating without a charger —
-                     covers the battery drain that happens before engine_on.
-                     Configured via preheat_unplugged_reserve_soc in apps.yaml.
+    preheat_reserve: SOC points to add for unplugged cabin preheating
+                     (estimated from forecast temperature via estimate_preheat_reserve).
     """
     if profile is None:
         return min(100, min_soc + buffer + preheat_reserve), True, fallback_reason
@@ -136,12 +170,8 @@ class EVPredictor(hass.Hass):
     def initialize(self):
         self.log("EVPredictor starting")
         self.model_file = self.args.get("model_file", "/config/ev_trips/consumption_model.json")
-        self.min_soc          = int(self.args.get("min_soc_threshold", 20))
-        self.buffer           = int(self.args.get("safety_buffer_soc", 5))
-        # Extra SOC reserve when preheating while NOT plugged in.
-        # Covers the battery drain before engine_on (typically 3–8 SOC points).
-        # Set to 0 in apps.yaml if you always preheat with a charger connected.
-        self.preheat_reserve  = int(self.args.get("preheat_unplugged_reserve_soc", 5))
+        self.min_soc    = int(self.args.get("min_soc_threshold", 20))
+        self.buffer     = int(self.args.get("safety_buffer_soc", 5))
 
         self.run_hourly(self._predict, ":00")
         self.listen_state(self._on_learning_update, "sensor.ev_learning_pct")
@@ -159,19 +189,24 @@ class EVPredictor(hass.Hass):
         drive_type = "mixed"
         trip_type  = "short"
 
+        # Preheat reserve — dynamic, based on expected cabin-to-target warming delta.
+        # When temp >= 5°C this is 0. Interior temp refines the estimate (e.g. warm garage).
+        interior_now  = self._get_interior_temp() if preheating else None
+        preheat_reserve = estimate_preheat_reserve(temp, interior_now)
+
         # Load model
         if not os.path.exists(self.model_file):
-            preheat_reserve = self.preheat_reserve if preheating else 0
             safe_target = min(100, self.min_soc + self.buffer + preheat_reserve)
             self._publish(
                 target=safe_target,
                 confidence="missing",
                 prediction_active=False,
-                status=f"🔵 No model yet. Charging to safe minimum ({safe_target}%).",
+                status=f"No model yet. Charging to safe minimum ({safe_target}%).",
                 fallback_used=True,
                 fallback_reason="model file missing",
                 temp=temp,
                 preheating=preheating,
+                preheat_reserve=preheat_reserve,
             )
             return
 
@@ -190,8 +225,6 @@ class EVPredictor(hass.Hass):
             profiles, season, temp_band, drive_type, trip_type, preheating
         )
 
-        # Apply preheat reserve only when preheating is assumed (temp < 5°C)
-        preheat_reserve = self.preheat_reserve if preheating else 0
         target, fallback_used, fallback_reason = compute_target(
             profile, fallback_reason, self.min_soc, self.buffer,
             preheat_reserve=preheat_reserve,
@@ -200,24 +233,24 @@ class EVPredictor(hass.Hass):
         confidence    = profile.get("confidence", "missing") if profile else "missing"
         trip_count    = profile.get("count", 0) if profile else 0
         preheat_label = "preheating assumed" if preheating else "no preheating"
-        reserve_label = f" +{preheat_reserve}% unplugged-preheat reserve" if preheat_reserve else ""
+        reserve_label = f" +{preheat_reserve}% preheat reserve" if preheat_reserve else ""
 
         if not fallback_used and profile:
             status = (
                 f"Target SOC: {target}% (confidence: {confidence}, {trip_count} trips) | "
-                f"{temp:.0f}°C forecast, {preheat_label}{reserve_label}"
+                f"{temp:.0f}C forecast, {preheat_label}{reserve_label}"
             )
         elif fallback_reason == "no usable profile":
             needed = max(0, 5 - trip_count)
             key    = f"{season}|{temp_band}|{drive_type}|{trip_type}|{'preheated' if preheating else 'cold_start'}"
             status = (
-                f"🔵 Learning ({learning_pct}% complete). "
+                f"Learning ({learning_pct}% complete). "
                 f"Need {needed} more trips for {key}. "
                 f"Charging to safe minimum."
             )
         else:
             status = (
-                f"⚠️ Exact profile missing ({trip_count}/5 trips). "
+                f"Exact profile missing ({trip_count}/5 trips). "
                 f"Using {fallback_reason}. Target SOC: {target}%"
             )
 
@@ -233,6 +266,7 @@ class EVPredictor(hass.Hass):
             fallback_reason=fallback_reason,
             temp=temp,
             preheating=preheating,
+            preheat_reserve=preheat_reserve,
         )
 
     def _get_forecast_temp(self):
@@ -245,8 +279,16 @@ class EVPredictor(hass.Hass):
             pass
         return 0.0
 
+    def _get_interior_temp(self):
+        """Current cabin temperature — used to refine preheat reserve (e.g. garage parking)."""
+        try:
+            v = self.get_state(ENTITY_INTERIOR_TEMP)
+            return float(v) if v not in (None, "unavailable", "unknown") else None
+        except (TypeError, ValueError):
+            return None
+
     def _publish(self, target, confidence, prediction_active, status,
-                 fallback_used, fallback_reason, temp, preheating):
+                 fallback_used, fallback_reason, temp, preheating, preheat_reserve):
         self.set_state(
             "sensor.ev_target_soc",
             state=target,
@@ -262,6 +304,7 @@ class EVPredictor(hass.Hass):
                 "fallback_reason":     fallback_reason if fallback_used else None,
                 "forecast_temp":       round(temp, 1),
                 "preheating_assumed":  preheating,
+                "preheat_reserve_soc": preheat_reserve,
                 "last_updated":        datetime.now().isoformat(),
             },
         )
@@ -270,4 +313,5 @@ class EVPredictor(hass.Hass):
             state=status[:255],
             attributes={"friendly_name": "EV Prediction Status"},
         )
-        self.log(f"Published: target={target}%, fallback={fallback_used}, status={status[:80]}")
+        self.log(f"Published: target={target}%, preheat_reserve={preheat_reserve}%, "
+                 f"fallback={fallback_used}, status={status[:80]}")

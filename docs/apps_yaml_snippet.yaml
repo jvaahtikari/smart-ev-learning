@@ -17,7 +17,7 @@ ev_predictor:
   model_file: /config/ev_trips/consumption_model.json
   min_soc_threshold: 20
   safety_buffer_soc: 5
-  # Extra SOC added to the target when preheating is assumed (temp < 5°C),
-  # to cover battery drain from preheating while NOT plugged in (~3–8 points).
-  # Set to 0 if you always preheat with the car plugged in.
-  preheat_unplugged_reserve_soc: 5
+  # Preheat reserve is calculated dynamically from forecast temperature —
+  # no manual configuration needed. The formula (PREHEAT_SOC_PER_DEGREE = 0.15)
+  # estimates SOC per °C of cabin warming needed and can be tuned in predictor.py.
+  # Example reserves: -5°C -> 4%, -10°C -> 5%, -20°C -> 6%
