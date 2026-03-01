@@ -130,6 +130,8 @@ class EVModelUpdater(hass.Hass):
         self.listen_state(self._on_trip_saved, "sensor.ev_last_trip_saved")
         self.run_daily(self._rebuild, "02:00:00")
         self.log("Listening for new trips and scheduled daily rebuild at 02:00")
+        # Run once immediately at startup to process any pre-existing trips.json
+        self._rebuild({})
 
     def _on_trip_saved(self, entity, attribute, old, new, kwargs):
         self._rebuild({})

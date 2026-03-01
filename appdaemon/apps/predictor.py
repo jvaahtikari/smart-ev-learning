@@ -173,9 +173,11 @@ class EVPredictor(hass.Hass):
         self.min_soc    = int(self.args.get("min_soc_threshold", 20))
         self.buffer     = int(self.args.get("safety_buffer_soc", 5))
 
-        self.run_hourly(self._predict, ":00")
+        self.run_hourly(self._predict)
         self.listen_state(self._on_learning_update, "sensor.ev_learning_pct")
         self.log("Predictor scheduled hourly and on learning updates")
+        # Run once immediately at startup so sensors are published right away
+        self._predict({})
 
     def _on_learning_update(self, entity, attribute, old, new, kwargs):
         self._predict({})
