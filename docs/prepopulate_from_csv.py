@@ -12,12 +12,13 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
-MOTOR    = "sensor.smart_motor"
-BATTERY  = "sensor.smart_battery"
-ODOMETER = "sensor.smart_odometer"
-RANGE_S  = "sensor.smart_range"
-PREHEAT  = "sensor.smart_pre_climate_active"
-WEATHER  = "weather.forecast_koti"
+MOTOR     = "sensor.smart_motor"
+BATTERY   = "sensor.smart_battery"
+ODOMETER  = "sensor.smart_odometer"
+RANGE_S   = "sensor.smart_range"
+PREHEAT   = "sensor.smart_pre_climate_active"
+WEATHER   = "weather.forecast_koti"
+AVG_SPEED = "sensor.smart_average_speed"
 
 STOP_TIMEOUT_MIN = 5
 
@@ -88,6 +89,7 @@ def reconstruct_trips(series):
     odometer     = series.get(ODOMETER, [])
     range_est    = series.get(RANGE_S, [])
     preheat_s    = series.get(PREHEAT, [])
+    avg_speed_s  = series.get(AVG_SPEED, [])
 
     # Find engine_running / engine_off transitions
     segments = []
@@ -137,7 +139,10 @@ def reconstruct_trips(series):
         if distance_km < 0.3 or duration_min < 1 or consumed_soc <= 0:
             continue
 
-        avg_speed    = (distance_km / duration_min) * 60
+        # Use car's own average speed sensor at engine_off (more accurate)
+        car_avg_speed = nearest_float(avg_speed_s, end_ts, max_gap_hours=0.1)
+        avg_speed     = car_avg_speed if (car_avg_speed and car_avg_speed > 0) \
+                        else (distance_km / duration_min) * 60
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
         trip_type    = "short" if distance_km < 20 else "long"
 
@@ -178,16 +183,36 @@ def reconstruct_trips(series):
     return trips
 
 
+def merge_series(a, b):
+    """Merge two series dicts, combining lists and re-sorting by timestamp."""
+    merged = dict(a)
+    for entity, events in b.items():
+        if entity in merged:
+            merged[entity] = sorted(merged[entity] + events, key=lambda x: x[0])
+        else:
+            merged[entity] = events
+    return merged
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python prepopulate_from_csv.py <history.csv> [trips.json]")
+        print("Usage: python prepopulate_from_csv.py <history1.csv> [history2.csv ...] [--out trips.json]")
         sys.exit(1)
 
-    csv_path  = sys.argv[1]
-    out_path  = sys.argv[2] if len(sys.argv) > 2 else "trips_prepopulated.json"
+    args     = sys.argv[1:]
+    out_path = "trips_prepopulated.json"
+    csv_files = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--out":
+            out_path = args[i + 1]; i += 2
+        else:
+            csv_files.append(args[i]); i += 1
 
-    print(f"Loading {csv_path} ...")
-    series = load_csv(csv_path)
+    series = {}
+    for csv_path in csv_files:
+        print(f"Loading {csv_path} ...")
+        series = merge_series(series, load_csv(csv_path))
     print(f"Entities found: {list(series.keys())}")
 
     trips = reconstruct_trips(series)

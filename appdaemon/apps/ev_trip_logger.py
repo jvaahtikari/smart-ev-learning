@@ -20,6 +20,7 @@ ENTITY_ODOMETER       = "sensor.smart_odometer"
 ENTITY_PREHEAT        = "sensor.smart_pre_climate_active"
 ENTITY_CHARGER        = "sensor.zag063912_charger_mode"
 ENTITY_WEATHER        = "weather.forecast_koti"
+ENTITY_AVG_SPEED      = "sensor.smart_average_speed"  # car's own rolling trip average
 
 ENGINE_ON_STATE       = "engine_running"
 ENGINE_OFF_STATE      = "engine_off"
@@ -123,6 +124,7 @@ class EVTripLogger(hass.Hass):
             f"range_estimate_{label}":   self._float(ENTITY_RANGE),
             f"odometer_{label}":         self._float(ENTITY_ODOMETER),
             f"temp_{label}":             temp,
+            f"avg_speed_{label}":        self._float(ENTITY_AVG_SPEED),
             "preheating":                preheat,
             "plugged_in_preheat":        plugged_preheat,
         }
@@ -192,7 +194,9 @@ class EVTripLogger(hass.Hass):
             return None
 
         temp_actual  = (seg["temp_start"] + seg["temp_end"]) / 2
-        avg_speed    = (distance_km / duration_min) * 60
+        # Prefer car's own trip average speed (more accurate than calculated)
+        car_avg_speed = seg.get("avg_speed_end", 0)
+        avg_speed     = car_avg_speed if car_avg_speed > 0 else (distance_km / duration_min) * 60
 
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
         trip_type    = "short" if distance_km < 20 else "long"
