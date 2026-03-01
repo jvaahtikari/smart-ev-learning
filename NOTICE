@@ -1,0 +1,37 @@
+EV Smart Charging for Home Assistant
+Copyright (C) 2026 Jussi Vaahtikari
+
+This software is licensed under the GNU Affero General Public License v3.0
+(AGPL-3.0). See the LICENSE file for the full license text.
+
+-------------------------------------------------------------------------------
+
+ORIGINAL INNOVATIONS
+
+The following design concepts were originated by the author in this project:
+
+1. Forecast-extended price horizon for EV slot scheduling
+   Using multi-day ahead hourly price forecasts (e.g. Nordpool Predict FI)
+   as a first-class data source, expanded to 15-minute slots and merged with
+   confirmed spot prices into a single globally-ranked price series. This
+   allows the planner to select slots from a horizon of several days rather
+   than being constrained to the ~35-hour confirmed spot window.
+
+2. Dual-deadline EV charging architecture
+   Running two independent deadline-bounded optimisations simultaneously:
+   - A long-horizon smart deadline (user-set, potentially days ahead) that
+     selects the globally cheapest slots across the full available dataset
+   - A daily minimum-SOC deadline (configurable hour-of-day) that guarantees
+     a minimum state of charge is reached by a fixed time each day as a hard
+     safety floor, independently of the long-horizon plan
+   This combination enables multi-day cost-optimised charging while
+   maintaining a guaranteed daily usability floor — a design not found in
+   commercial or open-source EV charging schedulers at the time of writing.
+
+-------------------------------------------------------------------------------
+
+COMMERCIAL USE
+
+Use of this software in a commercial product or service (including
+software-as-a-service) requires a separate commercial licence from the
+copyright holder. Contact: jussi.vaahtikari@eslshipping.com
