@@ -33,18 +33,27 @@ cp appdaemon/apps/*.py /addon_configs/a0d7b954_appdaemon/apps/
 3. Create the HA input helpers. See `docs/ha_helpers.yaml` — add these to your
    `configuration.yaml` or create them via the HA UI (Settings → Helpers).
 
-4. Create the data directory on your HA host:
+4. Create the data directory inside the AppDaemon config area on your HA host:
 
 ```bash
-mkdir -p /homeassistant/ev_trips
+mkdir -p /addon_configs/a0d7b954_appdaemon/ev_trips
 ```
 
-5. Restart AppDaemon. Verify in the AppDaemon log that all three apps load without errors.
+> **Important:** AppDaemon's `/config/` inside its container maps to `/addon_configs/a0d7b954_appdaemon/`
+> on the host — **not** to HA's main `/config/` directory. All file paths in `apps.yaml` are
+> relative to the AppDaemon container.
 
-6. *(Optional)* Bootstrap with historical data:
+5. Restart AppDaemon. All apps run an initial pass at startup:
+   - `ev_model_updater` rebuilds the model from any existing `trips.json`
+   - `ev_predictor` publishes `sensor.ev_target_soc` immediately (safe minimum until model is ready)
+   Verify in the AppDaemon log that all three apps load without errors.
+
+6. *(Optional)* Bootstrap with historical data using the HA history CSV export:
 
 ```bash
-python docs/prepopulate_from_csv.py history.csv /addon_configs/a0d7b954_appdaemon/apps/../../../data/ev_trips/trips.json
+python docs/prepopulate_from_csv.py history1.csv [history2.csv ...] --out trips.json
+# Then copy the output to the AppDaemon data directory:
+cp trips.json /addon_configs/a0d7b954_appdaemon/ev_trips/trips.json
 ```
 
 ## Configuration
@@ -94,8 +103,12 @@ to match your actual HA installation before deploying.
 
 ## Data files (not committed — runtime only)
 
-- `/config/ev_trips/trips.json` — all recorded trip segments
-- `/config/ev_trips/consumption_model.json` — built model with EWA per profile
+These live inside the AppDaemon config area on the HA host:
+
+| Host path | Container path | Description |
+|---|---|---|
+| `/addon_configs/a0d7b954_appdaemon/ev_trips/trips.json` | `/config/ev_trips/trips.json` | All recorded trip segments |
+| `/addon_configs/a0d7b954_appdaemon/ev_trips/consumption_model.json` | `/config/ev_trips/consumption_model.json` | Built model with EWA per profile |
 
 ## Out of scope (future)
 

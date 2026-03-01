@@ -40,8 +40,24 @@ sensor.smart_motor
 
 ## AppDaemon config path on HA host
 
-`/addon_configs/a0d7b954_appdaemon/apps/`
+| What | Host path | Container path |
+|---|---|---|
+| App scripts | `/addon_configs/a0d7b954_appdaemon/apps/` | `/config/apps/` |
+| Trip data | `/addon_configs/a0d7b954_appdaemon/ev_trips/` | `/config/ev_trips/` |
 
-Note: this is different from `/homeassistant/apps/` (the HA config directory).
+Note: AppDaemon's `/config/` inside its container maps to `/addon_configs/a0d7b954_appdaemon/`
+on the host — NOT to HA's main `/config/` (`/homeassistant/`).
 The push script in claude-homeassistant repo writes to /homeassistant/ and is
 irrelevant for AppDaemon script deployment.
+
+## Startup behaviour
+
+Both `ev_model_updater` and `ev_predictor` call their main function at the end of
+`initialize()` so HA sensors are populated immediately on AppDaemon boot — no waiting
+for the next hourly/daily schedule tick.
+
+## Known deployment gotcha: `run_hourly` format
+
+AppDaemon's `run_hourly(callback, start)` expects `start` in `"HH:MM:SS"` format or
+omitted entirely. Passing `":00"` silently breaks callback registration. Use no
+`start` argument to run every hour from startup.
