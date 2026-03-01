@@ -61,6 +61,8 @@ to match your actual HA installation before deploying.
 | `ENTITY_PREHEAT` | `sensor.smart_pre_climate_active` | Preheating active |
 | `ENTITY_CHARGER` | `sensor.zag063912_charger_mode` | Charger mode sensor |
 | `ENTITY_WEATHER` | `weather.forecast_koti` | Weather entity for temperature |
+| `ENTITY_AVG_SPEED` | `sensor.smart_average_speed` | Rolling trip average speed (km/h); resets at engine_on |
+| `ENTITY_AVG_POWER` | `sensor.smart_average_power_consumption` | Rolling trip average power (kWh/100km); resets at engine_on |
 
 > **Entity names:** The default entity names match the SmartHashtag integration naming
 > convention but include a vehicle-specific identifier. Find your actual entity names

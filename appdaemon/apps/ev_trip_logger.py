@@ -20,7 +20,8 @@ ENTITY_ODOMETER       = "sensor.smart_odometer"
 ENTITY_PREHEAT        = "sensor.smart_pre_climate_active"
 ENTITY_CHARGER        = "sensor.zag063912_charger_mode"
 ENTITY_WEATHER        = "weather.forecast_koti"
-ENTITY_AVG_SPEED      = "sensor.smart_average_speed"  # car's own rolling trip average
+ENTITY_AVG_SPEED      = "sensor.smart_average_speed"   # car's own rolling trip average
+ENTITY_AVG_POWER      = "sensor.smart_average_power_consumption"  # kWh/100km, resets at engine_on
 
 ENGINE_ON_STATE       = "engine_running"
 ENGINE_OFF_STATE      = "engine_off"
@@ -125,6 +126,7 @@ class EVTripLogger(hass.Hass):
             f"odometer_{label}":         self._float(ENTITY_ODOMETER),
             f"temp_{label}":             temp,
             f"avg_speed_{label}":        self._float(ENTITY_AVG_SPEED),
+            f"avg_power_{label}":        self._float(ENTITY_AVG_POWER),
             "preheating":                preheat,
             "plugged_in_preheat":        plugged_preheat,
         }
@@ -198,6 +200,10 @@ class EVTripLogger(hass.Hass):
         car_avg_speed = seg.get("avg_speed_end", 0)
         avg_speed     = car_avg_speed if car_avg_speed > 0 else (distance_km / duration_min) * 60
 
+        # Car's own trip average power consumption (resets at engine_on → end value = trip average)
+        # Does NOT include pre-trip preheating (sensor starts fresh at engine_on)
+        avg_power     = seg.get("avg_power_end", 0)
+
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
         trip_type    = "short" if distance_km < 20 else "long"
         calc_basis   = "time" if (trip_type == "short" and temp_actual < 5) else "km"
@@ -231,7 +237,8 @@ class EVTripLogger(hass.Hass):
             "range_estimate_start": round(range_est, 1),
             "car_km_per_soc":       round(car_km_soc, 2),
             "actual_km_per_soc":    round(actual_km_soc, 2),
-            "correction_factor":    round(correction, 3),
+            "correction_factor":         round(correction, 3),
+            "avg_power_kwh_per_100km":   round(avg_power, 1) if avg_power > 0 else None,
         }
 
     def _append_trip(self, trip):

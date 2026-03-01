@@ -19,6 +19,7 @@ RANGE_S   = "sensor.smart_range"
 PREHEAT   = "sensor.smart_pre_climate_active"
 WEATHER   = "weather.forecast_koti"
 AVG_SPEED = "sensor.smart_average_speed"
+AVG_POWER = "sensor.smart_average_power_consumption"
 
 STOP_TIMEOUT_MIN = 5
 
@@ -90,6 +91,7 @@ def reconstruct_trips(series):
     range_est    = series.get(RANGE_S, [])
     preheat_s    = series.get(PREHEAT, [])
     avg_speed_s  = series.get(AVG_SPEED, [])
+    avg_power_s  = series.get(AVG_POWER, [])
 
     # Find engine_running / engine_off transitions
     segments = []
@@ -141,6 +143,8 @@ def reconstruct_trips(series):
 
         # Use car's own average speed sensor at engine_off (more accurate)
         car_avg_speed = nearest_float(avg_speed_s, end_ts, max_gap_hours=0.1)
+        # Power consumption at engine_off = trip average (sensor resets at engine_on)
+        power_val     = nearest_float(avg_power_s, end_ts, max_gap_hours=0.1)
         avg_speed     = car_avg_speed if (car_avg_speed and car_avg_speed > 0) \
                         else (distance_km / duration_min) * 60
         drive_type   = "city" if avg_speed < 50 else ("mixed" if avg_speed < 80 else "highway")
@@ -177,7 +181,8 @@ def reconstruct_trips(series):
             "range_estimate_start": round(range_val, 1) if range_val else 0,
             "car_km_per_soc":       round(car_km_soc, 2),
             "actual_km_per_soc":    round(actual_km_soc, 2),
-            "correction_factor":    round(correction, 3),
+            "correction_factor":         round(correction, 3),
+            "avg_power_kwh_per_100km":   round(power_val, 1) if power_val else None,
         })
 
     return trips
