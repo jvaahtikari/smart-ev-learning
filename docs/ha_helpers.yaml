@@ -1,0 +1,13 @@
+input_boolean:
+  ev_winter_tyres:
+    name: Winter tyres fitted
+    icon: mdi:tire
+
+input_number:
+  ev_min_soc_threshold:
+    name: Minimum SOC threshold
+    min: 10
+    max: 40
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:battery-alert

@@ -1,0 +1,8 @@
+/config/ev_trips/trips.json
+/config/ev_trips/consumption_model.json
+trips.json
+*_prepopulated.json
+consumption_model.json
+*.pyc
+__pycache__/
+.env

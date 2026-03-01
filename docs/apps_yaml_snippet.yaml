@@ -1,0 +1,19 @@
+ev_trip_logger:
+  module: ev_trip_logger
+  class: EVTripLogger
+  log_file: /config/ev_trips/trips.json
+
+ev_model_updater:
+  module: model_updater
+  class: EVModelUpdater
+  trips_file: /config/ev_trips/trips.json
+  model_file: /config/ev_trips/consumption_model.json
+  min_trips_per_profile: 5
+  learning_alpha: 0.15
+
+ev_predictor:
+  module: predictor
+  class: EVPredictor
+  model_file: /config/ev_trips/consumption_model.json
+  min_soc_threshold: 20
+  safety_buffer_soc: 5
